@@ -229,9 +229,9 @@ The PE files are declared in `scripts/windows-signing-lib.ps1`. A PE file is a `
 
 A bundle holding a PE file the list does not name fails with `studio-signing.undeclared-pe`, and one missing a listed file with `studio-signing.missing-pe`. A person adds it to the right list.
 
-The release PE files as of 2.20.3:
+The release PE files:
 
-- `Reasonix Studio.exe`, `resources/bin/reasonix-studio-host.exe`, `resources/bin/reasonix-computer-helper.exe`
+- `Reasonix Studio.exe`, `resources/bin/reasonix-studio-host.exe`, `resources/bin/cua-driver.exe`
 - `dxcompiler.dll`, `ffmpeg.dll`, `vk_swiftshader.dll`, `vulkan-1.dll`
 
 | Rule | Detail |

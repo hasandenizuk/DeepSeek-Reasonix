@@ -41,13 +41,15 @@ files:
   - assets/**/*
   - package.json
 extraResources:
+  - from: ../../internal/platform/computer/cua-driver.lock.json
+    to: bin/cua-driver.lock.json
   - from: bin
     to: bin
     filter:
       - reasonix-studio-host
       - reasonix-studio-host.exe
-      - reasonix-computer-helper
-      - reasonix-computer-helper.exe
+      - cua-driver
+      - cua-driver.exe
   - from: ../frontend-next/dist
     to: frontend-next/dist
 

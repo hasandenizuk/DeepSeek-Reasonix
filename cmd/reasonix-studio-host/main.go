@@ -36,6 +36,7 @@ import (
 	"reasonix/internal/frontend/traystate"
 	"reasonix/internal/platform/account"
 	"reasonix/internal/platform/appupdate"
+	"reasonix/internal/platform/computer"
 	"reasonix/internal/platform/crashreport"
 	"reasonix/internal/platform/feedback"
 	"reasonix/internal/platform/instanceid"
@@ -129,7 +130,9 @@ func main() {
 	// replace it.
 	studioApp := flag.String("studio-app", "", "the application executable this host runs inside")
 	studioAppPID := flag.Int("studio-app-pid", 0, "the process id of that application")
-	computerHelper := flag.String("computer-helper", "", "the native helper that operates this machine's applications")
+	computerDriver := flag.String("cua-driver", "", "the pinned CUA Driver executable")
+	computerAbortSocket := flag.String("computer-abort-socket", "", "the private Studio CUA interruption endpoint")
+	computerSocket := flag.String("computer-socket", "", "the private embedded CUA socket owned by Studio")
 	crashDir := flag.String("crash-dir", "", "the directory a fatal runtime error is written to")
 	stripGrants := flag.Bool("strip-package-grants", false, "remove app-package grants from the directory -studio-app runs from, print what changed, and exit")
 	flag.Parse()
@@ -143,10 +146,18 @@ func main() {
 		fmt.Fprintln(os.Stdout, instanceid.Current())
 		return
 	}
-	boot.SetComputerHelper(*computerHelper)
+	var driver *computer.Driver
+	if *computerDriver != "" {
+		if *computerSocket != "" {
+			driver = computer.NewEmbeddedDriver(*computerDriver, *computerSocket, *computerAbortSocket, os.Environ())
+		} else {
+			driver = computer.NewDriver(*computerDriver, os.Environ())
+		}
+	}
+
 	shell := shellIdentity{version: *studioVersion, exe: *studioApp, pid: *studioAppPID, logsDir: logsDirOf(*crashDir)}
 	releaseFatalLog := crashreport.InstallFatalLog(*crashDir, defaultVersion(shell.version))
-	code := run(parentLease(os.Stdin), os.Stdout, os.Stderr, *page, shell)
+	code := run(parentLease(os.Stdin), os.Stdout, os.Stderr, *page, shell, driver)
 	releaseFatalLog()
 	os.Exit(code)
 }
@@ -171,7 +182,10 @@ func defaultVersion(stated string) string {
 // the handshake first and then one line per act a handover asks of the shell,
 // because that pipe is the only channel pointing that way; every log goes to
 // logs, which is why no line there can be mistaken for one of these.
-func run(lease io.Reader, handshakeTo, logs io.Writer, page string, shell shellIdentity) int {
+func run(lease io.Reader, handshakeTo, logs io.Writer, page string, shell shellIdentity, driver *computer.Driver) int {
+	if driver != nil {
+		defer driver.Close()
+	}
 	phases := newStartupPhases(logs, time.Now)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -194,7 +208,7 @@ func run(lease io.Reader, handshakeTo, logs io.Writer, page string, shell shellI
 		fmt.Fprintln(logs, "reasonix-studio-host: no built page found; serving the kernel only")
 	}
 
-	hub, err := assemble(ctx, logs, handshakeTo, shell, served, phases)
+	hub, err := assemble(ctx, logs, handshakeTo, shell, served, phases, driver)
 	if err != nil {
 		fmt.Fprintln(logs, "reasonix-studio-host:", err)
 		return 1
@@ -312,7 +326,7 @@ func resolveKernelLanguage(cfg *config.Config) string {
 
 // assemble builds the hub this host serves: one pane on the workspace it was
 // launched in, carrying the capabilities a local window may exercise.
-func assemble(ctx context.Context, logs, handshakeTo io.Writer, shell shellIdentity, page fs.FS, phases *startupPhases) (*serve.Hub, error) {
+func assemble(ctx context.Context, logs, handshakeTo io.Writer, shell shellIdentity, page fs.FS, phases *startupPhases, driver *computer.Driver) (*serve.Hub, error) {
 	// The one-time upgrades belong to whichever entry point starts first; a
 	// person who only ever opens the window would otherwise never get them.
 	if _, err := config.ApplyUserConfigUpgradesOnStartup(config.UserConfigPath()); err != nil {
@@ -348,6 +362,7 @@ func assemble(ctx context.Context, logs, handshakeTo io.Writer, shell shellIdent
 	root := launchWorkspace(shell.exe)
 	phases.mark(startupWorkspace)
 	built, err := boot.BuildRuntime(ctx, boot.Options{
+		ComputerDriver:  driver,
 		Version:         version,
 		WorkspaceRoot:   root,
 		SessionDir:      serve.SessionDirFor(root),
@@ -389,22 +404,23 @@ func assemble(ctx context.Context, logs, handshakeTo io.Writer, shell shellIdent
 	// reason belongs in the log the shell keeps.
 	notify.OnSendFailure(func(err error) { fmt.Fprintf(logs, "notify: %v\n", err) })
 	hub := serve.NewHub(serve.HubOptions{
-		Serve:         hubCfg,
-		Surface:       surface.Desktop,
-		Page:          page,
-		Grant:         grantHostCapabilities,
-		DecorateSink:  decorate,
-		Tray:          &studioTray{tracker: tracker},
-		Notifications: notifySet,
-		NotifySender:  notify.NewPlatformSender(),
-		BrowserHost:   browserHost,
-		Asks:          asks,
-		Remote:        remotehost.New(ctx, version, asks),
-		OnClose:       func(rt *serve.Runtime) { tracker.Drop(paneKey(rt.Events)) },
-		Install:       studioInstall(shell),
-		Update:        studioUpdateHost(shell, owner),
-		Share:         share,
-		LogsDir:       shell.logsDir,
+		ComputerDriver: driver,
+		Serve:          hubCfg,
+		Surface:        surface.Desktop,
+		Page:           page,
+		Grant:          grantHostCapabilities,
+		DecorateSink:   decorate,
+		Tray:           &studioTray{tracker: tracker},
+		Notifications:  notifySet,
+		NotifySender:   notify.NewPlatformSender(),
+		BrowserHost:    browserHost,
+		Asks:           asks,
+		Remote:         remotehost.New(ctx, version, asks),
+		OnClose:        func(rt *serve.Runtime) { tracker.Drop(paneKey(rt.Events)) },
+		Install:        studioInstall(shell),
+		Update:         studioUpdateHost(shell, owner),
+		Share:          share,
+		LogsDir:        shell.logsDir,
 	})
 	share.Attach(hub.Handler())
 	srv := serve.New(built.Controller, bc, hubCfg)

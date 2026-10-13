@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"reasonix/internal/base/netclient"
 )
 
 func TestBlockedFetchIP(t *testing.T) {
@@ -46,7 +48,7 @@ func TestWebFetchAllowsLoopback(t *testing.T) {
 	defer srv.Close()
 
 	args, _ := json.Marshal(map[string]any{"url": srv.URL})
-	out, err := webFetch{}.Execute(context.Background(), args)
+	out, err := (webFetch{proxySpec: netclient.ProxySpec{Mode: netclient.ModeOff}}).Execute(context.Background(), args)
 	if err != nil {
 		t.Fatalf("loopback fetch should succeed, got %v", err)
 	}
@@ -59,7 +61,7 @@ func TestWebFetchAllowsLoopback(t *testing.T) {
 // endpoint is refused at dial time (no packet leaves the host).
 func TestWebFetchRefusesLinkLocal(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{"url": "http://169.254.169.254/latest/meta-data/"})
-	_, err := webFetch{}.Execute(context.Background(), args)
+	_, err := (webFetch{proxySpec: netclient.ProxySpec{Mode: netclient.ModeOff}}).Execute(context.Background(), args)
 	if err == nil {
 		t.Fatal("fetch to 169.254.169.254 should be refused")
 	}
@@ -92,7 +94,7 @@ func TestWebFetchDialsAllowedAddressBesideBlockedOne(t *testing.T) {
 	stubFetchLookup(t, "fdfe:dcba:9876::152", "127.0.0.1")
 
 	args, _ := json.Marshal(map[string]any{"url": "http://api-docs.example:" + port + "/"})
-	out, err := webFetch{}.Execute(context.Background(), args)
+	out, err := (webFetch{proxySpec: netclient.ProxySpec{Mode: netclient.ModeOff}}).Execute(context.Background(), args)
 	if err != nil {
 		t.Fatalf("fetch should use the allowed address, got %v", err)
 	}
@@ -104,7 +106,7 @@ func TestWebFetchDialsAllowedAddressBesideBlockedOne(t *testing.T) {
 func TestWebFetchRefusesHostWithOnlyBlockedAddresses(t *testing.T) {
 	stubFetchLookup(t, "fdfe:dcba:9876::152", "10.0.0.7")
 	args, _ := json.Marshal(map[string]any{"url": "http://internal.example/"})
-	_, err := webFetch{}.Execute(context.Background(), args)
+	_, err := (webFetch{proxySpec: netclient.ProxySpec{Mode: netclient.ModeOff}}).Execute(context.Background(), args)
 	if err == nil || !strings.Contains(err.Error(), "refusing to fetch internal address") {
 		t.Fatalf("want SSRF refusal, got %v", err)
 	}

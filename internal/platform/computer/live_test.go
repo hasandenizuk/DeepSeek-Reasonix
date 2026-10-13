@@ -1,40 +1,34 @@
-//go:build darwin || windows
+//go:build darwin || windows || linux
 
 package computer
 
 import (
 	"os"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// liveSession drives the real helper named by REASONIX_LIVE_COMPUTER, which
+// liveSession drives the real driver named by REASONIX_LIVE_COMPUTER, which
 // needs a desktop (and on macOS two permissions), so ordinary runs skip. One
 // session for the run, which is how a host holds one: on macOS, while one
-// helper process has captured, a capture in another never returns.
+// driver process has captured, a capture in another never returns.
 func liveSession(t *testing.T) *Session {
 	t.Helper()
 	path := os.Getenv("REASONIX_LIVE_COMPUTER")
-	if path == "" || (runtime.GOOS != "darwin" && runtime.GOOS != "windows") {
-		t.Skip("set REASONIX_LIVE_COMPUTER to a built computer-use helper to run live tests")
+	if path == "" {
+		t.Skip("set REASONIX_LIVE_COMPUTER to a pinned CUA Driver executable to run live tests")
 	}
-	liveOnce.Do(func() { live = NewSession(NewHelper(path)) })
-	// A locked screen hides every application's windows from accessibility, so
-	// what follows would fail as a missing element rather than as the machine
-	// being put away.
-	var status struct {
-		ScreenLocked bool `json:"screen_locked"`
-	}
-	if err := live.helper.Call(t.Context(), "status", nil, &status); err != nil {
-		t.Fatalf("the helper did not answer: %v", err)
-	}
-	if status.ScreenLocked {
-		t.Skip("the screen is locked; unlock it to run live computer tests")
-	}
+	liveOnce.Do(func() {
+		driver := NewDriver(path, os.Environ())
+		if socket := os.Getenv("REASONIX_LIVE_COMPUTER_SOCKET"); socket != "" {
+			driver = NewEmbeddedDriver(path, socket, os.Getenv("REASONIX_LIVE_COMPUTER_ABORT_SOCKET"), os.Environ())
+		}
+		nativeDriver = driver
+		live = NewSession(driver)
+	})
 	return live
 }
 
@@ -60,7 +54,7 @@ func lineRef(t *testing.T, lines []string, needle string) string {
 	t.Helper()
 	for _, l := range lines {
 		if strings.Contains(l, needle) {
-			if m := regexp.MustCompile(`\[(a\d+)\]`).FindStringSubmatch(l); m != nil {
+			if m := regexp.MustCompile(`\[(r[A-Za-z0-9]+)\]`).FindStringSubmatch(l); m != nil {
 				return m[1]
 			}
 		}

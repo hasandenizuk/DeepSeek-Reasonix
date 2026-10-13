@@ -1,18 +1,12 @@
 package computer
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"errors"
-	"fmt"
-	"image"
+	"crypto/rand"
+	"encoding/json"
 	"slices"
 	"strings"
-	"sync"
 	"time"
-
-	"reasonix/internal/model/visionimage"
 )
 
 // maxWait bounds a wait step: a pause longer than this is a task that should
@@ -24,6 +18,8 @@ const maxWait = 30 * time.Second
 // kept as one: macOS bundle ids, and Windows process file names or a Store
 // application's package family name.
 var refusedApps = map[string]string{
+	"electron":                    "Reasonix Studio itself",
+	"applicationframehost.exe":    "an application broker without an unambiguous executable identity",
 	"io.reasonix.studio":          "Reasonix Studio itself",
 	"com.github.Electron":         "Reasonix Studio itself",
 	"com.apple.Terminal":          "a terminal",
@@ -70,6 +66,20 @@ var refusedApps = map[string]string{
 	"wt.exe":                                      "a terminal",
 	"microsoft.powershell_8wekyb3d8bbwe":          "a terminal",
 	"microsoft.sechealthui_8wekyb3d8bbwe":         "Windows Security",
+	"reasonix studio":                             "Reasonix Studio itself",
+	"reasonix-studio":                             "Reasonix Studio itself",
+	"gnome-terminal-server":                       "a terminal",
+	"konsole":                                     "a terminal",
+	"xterm":                                       "a terminal",
+	"kitty":                                       "a terminal",
+	"alacritty":                                   "a terminal",
+	"wezterm-gui":                                 "a terminal",
+	"gnome-control-center":                        "system settings",
+	"systemsettings":                              "system settings",
+	"seahorse":                                    "the keychain",
+	"keepassxc":                                   "a password manager",
+	"bitwarden":                                   "a password manager",
+	"1password":                                   "a password manager",
 }
 
 // refusedFolded is refusedApps compared without case: Windows file names are
@@ -83,7 +93,10 @@ var refusedFolded = func() map[string]string {
 }()
 
 // Refused reports why an application is never operated, or "" when it may be.
-func Refused(bundle string) string { return refusedFolded[strings.ToLower(strings.TrimSpace(bundle))] }
+func Refused(bundle string) string {
+	identity, _, _ := strings.Cut(strings.TrimSpace(bundle), "!")
+	return refusedFolded[strings.ToLower(identity)]
+}
 
 // App is a running application a person can see.
 type App struct {
@@ -112,122 +125,138 @@ type Rect struct {
 	Height float64 `json:"height"`
 }
 
-// Session is the computer as one agent sees it: the helper it shares with every
-// other, and the geometry of the screenshots it was shown.
 type Session struct {
-	helper *Helper
-
-	mu    sync.Mutex
-	shots map[string]shotGeometry
+	driver *Driver
+	name   string
+	state  observation
 }
 
-type shotGeometry struct {
-	bounds Rect
-	scale  float64 // screen points per pixel of the image the model was shown
+type observation struct {
+	generation    uint64
+	app           App
+	window        Window
+	refs          map[string]string
+	capture       string
+	imageWidth    int
+	imageHeight   int
+	captureWidth  int
+	captureHeight int
 }
 
-// NewSession drives applications through helper.
-func NewSession(helper *Helper) *Session {
-	return &Session{helper: helper, shots: map[string]shotGeometry{}}
+func NewSession(driver *Driver) *Session {
+	return &Session{driver: driver, name: "reasonix-" + rand.Text()}
 }
 
-// Apps lists the applications a person can see, refused ones included and
-// marked by the caller.
-func (s *Session) Apps(ctx context.Context) ([]App, error) {
-	var r struct {
-		Apps []App `json:"apps"`
+func (s *Session) read(ctx context.Context, name string, args map[string]any, out any) (DriverResult, error) {
+	args["session"] = s.name
+	var result DriverResult
+	if err := s.driver.Call(ctx, name, args, &result); err != nil {
+		s.state = observation{}
+		return result, err
 	}
-	if err := s.call(ctx, "apps", nil, &r); err != nil {
+	if out != nil {
+		if len(result.Structured) == 0 {
+			return result, fail(CodeFailed, "CUA omitted structured result")
+		}
+		if err := json.Unmarshal(result.Structured, out); err != nil {
+			return result, fail(CodeFailed, "invalid CUA result: %v", err)
+		}
+	}
+	return result, nil
+}
+
+func (s *Session) Apps(ctx context.Context) ([]App, error) {
+	s.driver.desktop.Lock()
+	defer s.driver.desktop.Unlock()
+	return s.apps(ctx)
+}
+
+func (s *Session) apps(ctx context.Context) ([]App, error) {
+	var response struct {
+		Apps []struct {
+			PID     int32  `json:"pid"`
+			Bundle  string `json:"bundle_id"`
+			Name    string `json:"name"`
+			Active  bool   `json:"active"`
+			Running bool   `json:"running"`
+		} `json:"apps"`
+	}
+	if _, err := s.read(ctx, "list_apps", map[string]any{}, &response); err != nil {
 		return nil, err
 	}
-	return r.Apps, nil
+	var apps []App
+	for _, a := range response.Apps {
+		if !a.Running || a.PID <= 0 {
+			continue
+		}
+		bundle, exe, err := processIdentity(a.PID, a.Bundle)
+		if err != nil {
+			continue
+		}
+		var windows struct {
+			Windows []struct {
+				ID     int    `json:"window_id"`
+				PID    int32  `json:"pid"`
+				Title  string `json:"title"`
+				Bounds Rect   `json:"bounds"`
+			} `json:"windows"`
+		}
+		if _, err := s.read(ctx, "list_windows", map[string]any{"pid": a.PID}, &windows); err != nil {
+			return nil, err
+		}
+		app := App{PID: a.PID, Bundle: bundle, Exe: exe, Name: a.Name, Active: a.Active}
+		for _, w := range windows.Windows {
+			if w.PID == a.PID && w.ID > 0 {
+				app.Windows = append(app.Windows, Window{ID: w.ID, Title: w.Title, Bounds: w.Bounds})
+			}
+		}
+		apps = append(apps, app)
+	}
+	return apps, nil
 }
 
-// App resolves a bundle id to the running application, refusing the ones that
-// are never operated.
-func (s *Session) App(ctx context.Context, bundle string) (App, error) {
+func (s *Session) app(ctx context.Context, bundle string) (App, error) {
 	bundle = strings.TrimSpace(bundle)
 	if why := Refused(bundle); why != "" {
-		return App{}, fail(CodeAppRefused, "%s is %s, which the agent never operates", bundle, why)
+		return App{}, fail(CodeAppRefused, "%s is %s", bundle, why)
 	}
-	apps, err := s.Apps(ctx)
+	apps, err := s.apps(ctx)
 	if err != nil {
 		return App{}, err
 	}
+	var found []App
 	for _, app := range apps {
-		if app.Bundle != bundle {
-			continue
+		if app.Bundle == bundle {
+			if why := Refused(app.Exe); why != "" {
+				return App{}, fail(CodeAppRefused, "%s is %s", bundle, why)
+			}
+			found = append(found, app)
 		}
-		if why := Refused(app.Exe); why != "" {
-			return App{}, fail(CodeAppRefused, "%s is %s (%s), which the agent never operates", bundle, why, app.Exe)
+	}
+	if len(found) == 0 {
+		return App{}, fail(CodeNoApp, "no running application has identity %q", bundle)
+	}
+	if len(found) > 1 {
+		return App{}, fail(CodeNoApp, "application identity %q resolves to multiple processes", bundle)
+	}
+	return found[0], nil
+}
+
+func exactWindow(app App, ids []int) (Window, error) {
+	if len(ids) > 0 && ids[0] > 0 {
+		for _, w := range app.Windows {
+			if w.ID == ids[0] {
+				return w, nil
+			}
 		}
-		return app, nil
+		return Window{}, fail(CodeNoWindow, "window does not belong to this application")
 	}
-	return App{}, fail(CodeNoApp, "no running application has the bundle id %q; list apps first", bundle)
+	if len(app.Windows) != 1 {
+		return Window{}, fail(CodeNoWindow, "select an exact window id; application has %d windows", len(app.Windows))
+	}
+	return app.Windows[0], nil
 }
 
-// Snapshot is an application's accessibility tree, one element per line. Note
-// is the host's account of what the tree is missing, such as an application
-// that exposes no window at all; Modals are the windows holding its input.
-type Snapshot struct {
-	App       App
-	Lines     []string
-	Truncated bool
-	Note      string
-	Modals    []Modal
-}
-
-func (s *Session) Snapshot(ctx context.Context, bundle string) (Snapshot, error) {
-	app, err := s.App(ctx, bundle)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	var r struct {
-		Lines     []string `json:"lines"`
-		Truncated bool     `json:"truncated"`
-		Note      string   `json:"note"`
-		Modals    []Modal  `json:"modals"`
-	}
-	if err := s.call(ctx, "snapshot", map[string]any{"pid": app.PID}, &r); err != nil {
-		return Snapshot{}, err
-	}
-	return Snapshot{App: app, Lines: r.Lines, Truncated: r.Truncated, Note: r.Note, Modals: r.Modals}, nil
-}
-
-// Screenshot captures an application's front window, sized for a vision model.
-// x and y in later steps are read in this image's pixels.
-func (s *Session) Screenshot(ctx context.Context, bundle string) (string, App, error) {
-	app, err := s.App(ctx, bundle)
-	if err != nil {
-		return "", App{}, err
-	}
-	var r struct {
-		Data   string `json:"data"`
-		Mime   string `json:"mime"`
-		Bounds Rect   `json:"bounds"`
-	}
-	if err := s.call(ctx, "screenshot", map[string]any{"pid": app.PID}, &r); err != nil {
-		return "", App{}, err
-	}
-	raw, err := base64.StdEncoding.DecodeString(r.Data)
-	if err != nil {
-		return "", App{}, fail(CodeCaptureFailed, "the capture was not valid base64")
-	}
-	fitted, mime, err := visionimage.Fit(raw, r.Mime)
-	if err != nil {
-		return "", App{}, fail(CodeCaptureFailed, "%v", err)
-	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(fitted))
-	if err != nil || cfg.Width == 0 {
-		return "", App{}, fail(CodeCaptureFailed, "the capture could not be measured")
-	}
-	s.mu.Lock()
-	s.shots[app.Bundle] = shotGeometry{bounds: r.Bounds, scale: r.Bounds.Width / float64(cfg.Width)}
-	s.mu.Unlock()
-	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(fitted), app, nil
-}
-
-// Step is one input to an application.
 type Step struct {
 	Action string   `json:"action"`
 	Ref    string   `json:"ref,omitempty"`
@@ -265,7 +294,11 @@ func PointerSteps(steps []Step) bool {
 	return slices.ContainsFunc(steps, func(s Step) bool { return PointerStep(s.Action) })
 }
 
-// ActResult is what a run of steps did before it finished or stopped.
+type StepResult struct {
+	Note   string
+	Effect Effect
+}
+
 type ActResult struct {
 	App      App
 	Done     int
@@ -273,205 +306,36 @@ type ActResult struct {
 	FailedAt int
 }
 
-// StepResult is one step that went through: what it was, and what is known
-// of its effect.
-type StepResult struct {
-	Note   string
-	Effect Effect
-}
-
-// Act runs steps in order on one application and stops at the first that
-// fails, or when the person presses Escape while the agent's cursor is showing.
-func (s *Session) Act(ctx context.Context, bundle string, steps []Step) (ActResult, error) {
+func (s *Session) Act(ctx context.Context, bundle string, steps []Step, windows ...int) (ActResult, error) {
+	s.driver.desktop.Lock()
+	defer s.driver.desktop.Unlock()
 	res := ActResult{FailedAt: -1}
-	app, err := s.App(ctx, bundle)
+	app, err := s.app(ctx, bundle)
 	if err != nil {
 		res.FailedAt = 0
 		return res, err
 	}
 	res.App = app
-	// The pointer goes back where the person left it when the steps are done,
-	// whether they finished or stopped.
-	if PointerSteps(steps) {
-		defer func() {
-			release, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			_ = s.helper.Call(release, "pointer_release", nil, nil)
-			cancel()
-		}()
+	window, err := exactWindow(app, windows)
+	if err != nil {
+		res.FailedAt = 0
+		return res, err
 	}
-	started := s.helper.stopMark()
 	for i, step := range steps {
-		if s.helper.stoppedSince(started) {
+		if err := ctx.Err(); err != nil {
+			s.state = observation{}
 			res.FailedAt = i
-			return res, fail(CodeStopped, "the person pressed Escape; ask before continuing")
+			return res, err
 		}
-		done, err := s.step(ctx, app, step)
+		done, err := s.step(ctx, app, window, step)
+		if err == nil || done.Effect.Class != "" {
+			res.Done++
+			res.Steps = append(res.Steps, done)
+		}
 		if err != nil {
 			res.FailedAt = i
 			return res, err
 		}
-		res.Done++
-		res.Steps = append(res.Steps, done)
 	}
 	return res, nil
-}
-
-// actReply is a step's answer from the helper: what it did, and the fields
-// some steps add to say how.
-type actReply struct {
-	Effect *wireEffect `json:"effect"`
-	Role   string      `json:"role"`
-	How    string      `json:"how"`
-}
-
-// deliver sends one step to the helper and settles what it reports it did.
-func (s *Session) deliver(ctx context.Context, method string, params map[string]any, note func(actReply) string) (StepResult, error) {
-	var r actReply
-	if err := s.call(ctx, method, params, &r); err != nil {
-		return StepResult{}, err
-	}
-	return StepResult{Note: note(r), Effect: r.Effect.settle()}, nil
-}
-
-func noted(note string) func(actReply) string { return func(actReply) string { return note } }
-
-func (s *Session) step(ctx context.Context, app App, step Step) (StepResult, error) {
-	pid := app.PID
-	switch strings.ToLower(strings.TrimSpace(step.Action)) {
-	case "click":
-		if step.Ref != "" {
-			return s.deliver(ctx, "press", map[string]any{"pid": pid, "ref": step.Ref}, noted("press "+step.Ref))
-		}
-		x, y, err := s.screenPoint(app, step)
-		if err != nil {
-			return StepResult{}, err
-		}
-		return s.deliver(ctx, "click", map[string]any{"pid": pid, "x": x, "y": y}, func(r actReply) string {
-			return fmt.Sprintf("click the %s at (%v,%v)", r.Role, *step.X, *step.Y)
-		})
-	case "focus":
-		return s.deliver(ctx, "focus", map[string]any{"pid": pid, "ref": step.Ref}, noted("focus "+step.Ref))
-	case "set_value":
-		return s.deliver(ctx, "set_value", map[string]any{"pid": pid, "ref": step.Ref, "text": step.Text},
-			noted(fmt.Sprintf("set %s to %d characters", step.Ref, len([]rune(step.Text)))))
-	case "type":
-		return s.deliver(ctx, "type", map[string]any{"pid": pid, "text": step.Text}, noted(fmt.Sprintf("type %d characters", len([]rune(step.Text)))))
-	case "key":
-		return s.deliver(ctx, "key", map[string]any{"pid": pid, "key": step.Key, "times": max(step.Times, 1)}, noted("press "+step.Key))
-	case "paste":
-		return s.deliver(ctx, "paste", map[string]any{"pid": pid, "text": step.Text}, noted(fmt.Sprintf("paste %d characters", len([]rune(step.Text)))))
-	case "hold_key":
-		return s.deliver(ctx, "hold_key", map[string]any{"pid": pid, "key": step.Key, "seconds": step.Seconds},
-			noted(fmt.Sprintf("hold %s for %vs", step.Key, step.Seconds)))
-	case "pointer_move", "pointer_click", "pointer_drag":
-		return s.pointerStep(ctx, app, step)
-	case "pointer_position":
-		var at struct{ X, Y float64 }
-		if err := s.call(ctx, "pointer_position", nil, &at); err != nil {
-			return StepResult{}, err
-		}
-		return StepResult{Note: s.describePoint(app, at.X, at.Y)}, nil
-	case "right_click":
-		if step.Ref == "" {
-			return StepResult{}, fail(CodeBadStep, "a right_click needs a ref; the menu belongs to the element")
-		}
-		return s.deliver(ctx, "menu", map[string]any{"pid": pid, "ref": step.Ref}, noted("open the menu of "+step.Ref))
-	case "scroll":
-		return s.deliver(ctx, "scroll", map[string]any{"pid": pid, "ref": step.Ref, "amount": step.Amount}, func(r actReply) string {
-			if r.How == "revealed" {
-				return "bring " + step.Ref + " into view"
-			}
-			return fmt.Sprintf("scroll %v lines", step.Amount)
-		})
-	case "wait":
-		d := min(time.Duration(step.Ms)*time.Millisecond, maxWait)
-		select {
-		case <-time.After(d):
-		case <-ctx.Done():
-			return StepResult{}, ctx.Err()
-		}
-		return StepResult{Note: "wait " + d.String()}, nil
-	}
-	return StepResult{}, fail(CodeBadStep, "unknown action %q; use click, right_click, focus, set_value, type, paste, key, hold_key, scroll, wait, or the pointer steps pointer_move, pointer_click and pointer_drag", step.Action)
-}
-
-// pointerStep takes the person's pointer to the point a screenshot named. The
-// helper refuses a point whose window belongs to another application, so an
-// approval for one application cannot reach into the next.
-func (s *Session) pointerStep(ctx context.Context, app App, step Step) (StepResult, error) {
-	x, y, err := s.screenPoint(app, step)
-	if err != nil {
-		return StepResult{}, err
-	}
-	args := map[string]any{"pid": app.PID, "x": x, "y": y}
-	switch strings.ToLower(strings.TrimSpace(step.Action)) {
-	case "pointer_move":
-		return s.deliver(ctx, "pointer_move", args, noted(fmt.Sprintf("move the pointer to (%v,%v)", *step.X, *step.Y)))
-	case "pointer_drag":
-		to := Step{X: step.ToX, Y: step.ToY}
-		if to.X == nil || to.Y == nil {
-			return StepResult{}, fail(CodeBadStep, "a pointer_drag needs where it ends: to_x and to_y")
-		}
-		toX, toY, err := s.screenPoint(app, to)
-		if err != nil {
-			return StepResult{}, err
-		}
-		args["to_x"], args["to_y"] = toX, toY
-		return s.deliver(ctx, "pointer_drag", args, noted(fmt.Sprintf("drag the pointer from (%v,%v) to (%v,%v)", *step.X, *step.Y, *to.X, *to.Y)))
-	}
-	button := step.Button
-	if button == "" {
-		button = "left"
-	}
-	args["button"], args["clicks"] = button, max(step.Times, 1)
-	return s.deliver(ctx, "pointer_click", args, noted(fmt.Sprintf("%s click at (%v,%v)", button, *step.X, *step.Y)))
-}
-
-// describePoint says where a point on screen is in the pixels of the
-// application's latest screenshot, which is the only frame the model has. With
-// no screenshot taken there is no such frame, and the screen's own is said.
-func (s *Session) describePoint(app App, x, y float64) string {
-	s.mu.Lock()
-	shot, ok := s.shots[app.Bundle]
-	s.mu.Unlock()
-	if !ok || shot.scale == 0 {
-		return fmt.Sprintf("the pointer is at (%.0f,%.0f) on screen; take a screenshot to place it in this application", x, y)
-	}
-	return fmt.Sprintf("the pointer is at (%.0f,%.0f) in the screenshot", (x-shot.bounds.X)/shot.scale, (y-shot.bounds.Y)/shot.scale)
-}
-
-// screenPoint converts a point in the latest screenshot's pixels to global
-// screen points.
-func (s *Session) screenPoint(app App, step Step) (float64, float64, error) {
-	if step.X == nil || step.Y == nil {
-		return 0, 0, fail(CodeBadStep, "a click needs a ref, or x and y from a screenshot")
-	}
-	s.mu.Lock()
-	shot, ok := s.shots[app.Bundle]
-	s.mu.Unlock()
-	if !ok {
-		return 0, 0, fail(CodeNeedsScreenshot, "take a screenshot of %s first; x and y are read in its pixels", app.Bundle)
-	}
-	return shot.bounds.X + *step.X*shot.scale, shot.bounds.Y + *step.Y*shot.scale, nil
-}
-
-var permissionNames = map[string]string{"accessibility": "Accessibility", "screen_recording": "Screen Recording"}
-
-// call runs one helper request. A permission the system has not granted is
-// asked for once per helper, which opens the settings pane where it is granted,
-// and the failure tells the model what the person has to do there.
-func (s *Session) call(ctx context.Context, method string, params, out any) error {
-	err := s.helper.Call(ctx, method, params, out)
-	f, ok := errors.AsType[*Failure](err)
-	if !ok || f.Code != CodePermissionMissing {
-		return err
-	}
-	name, known := permissionNames[f.Detail]
-	if !known {
-		return err
-	}
-	if s.helper.firstAsk(f.Detail) {
-		_ = s.helper.Call(ctx, "request_permission", map[string]any{"which": f.Detail}, nil)
-	}
-	return fail(CodePermissionMissing, "Reasonix Studio has not been granted %s. Ask the person to switch it on under System Settings → Privacy & Security → %s, then try again", name, name)
 }

@@ -3,83 +3,57 @@ package computer
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"testing"
 )
 
-// A step whose input a modal would swallow is not a step that went through:
-// it fails with an identity, and the failure names the modal from structure.
-func TestAStepAModalHoldsFailsAndNamesTheModal(t *testing.T) {
+func TestCUARefusalDoesNotFabricateModalIdentity(t *testing.T) {
+	t.Setenv("REASONIX_CUA_EFFECT", "refused")
 	s := fakeSession(t)
-	res, err := s.Act(context.Background(), "com.example.Held", []Step{{Action: "type", Text: "hello"}})
-	if CodeOf(err) != CodeBlocked || res.Done != 0 || res.FailedAt != 0 {
-		t.Fatalf("typing into a held application = %+v, %v; want %s at step 1 with nothing done", res, err, CodeBlocked)
+	ref := snapshotRef(t, s)
+	res, err := s.Act(context.Background(), "com.example.Notes", []Step{{Action: "click", Ref: ref}})
+	if CodeOf(err) != CodeDriverRefused || res.Done != 0 || res.FailedAt != 0 {
+		t.Fatalf("%+v %v", res, err)
 	}
-	f, _ := errors.AsType[*Failure](err)
-	if f.BlockedBy == nil || *f.BlockedBy != (Modal{Ref: "a34", Title: "Error", Blocks: "Untitled"}) {
-		t.Fatalf("the failure does not carry the modal: %+v", f)
-	}
-	if !strings.Contains(err.Error(), `the modal "Error" [a34]`) {
-		t.Fatalf("the failure does not say which modal: %v", err)
-	}
-	if !errors.Is(err, &Failure{Code: CodeBlocked}) {
-		t.Fatal("a blocked failure does not match its code")
+	failure, _ := errors.AsType[*Failure](err)
+	if failure.BlockedBy != nil {
+		t.Fatal("CUA supplied no structured modal identity")
 	}
 }
 
-// The helper reports a class; the kernel grants it only what the evidence
-// carries. A step that sends nothing has no effect at all.
 func TestAnEffectIsOnlyAsStrongAsItsEvidence(t *testing.T) {
-	s := fakeSession(t)
-	res, err := s.Act(context.Background(), "com.example.Notes", []Step{
-		{Action: "set_value", Ref: "a2", Text: "hi"},
-		{Action: "type", Text: "hi"},
-		{Action: "focus", Ref: "a2"},
-		{Action: "key", Key: "Enter"},
-		{Action: "wait", Ms: 1},
-		{Action: "hold_key", Key: "shift", Seconds: 0.1},
-	})
-	if err != nil || len(res.Steps) != 6 {
-		t.Fatalf("Act = %+v, %v", res, err)
+	action := DriverAction{Effect: "confirmed", Route: "accessibility"}
+	if action.project().Class != EffectUnverifiable {
+		t.Fatal("confirmation without evidence")
 	}
-	want := []struct {
-		class    EffectClass
-		evidence Evidence
-		modal    bool
-	}{
-		{EffectConfirmed, EvidenceValueReadback, false},
-		{EffectUnverifiable, "", false},
-		{EffectSuspectedNoop, EvidenceValueUnchanged, false},
-		{EffectUnverifiable, "", true},
-		{"", "", false},
-		{EffectUnverifiable, "", false},
+	action.Evidence = append(action.Evidence, struct {
+		Kind   string `json:"kind"`
+		Detail string `json:"detail"`
+	}{Kind: "value_readback"})
+	if action.project().Class != EffectConfirmed {
+		t.Fatal("readback not retained")
 	}
-	for i, w := range want {
-		got := res.Steps[i].Effect
-		if got.Class != w.class || (w.evidence == "") != (len(got.Evidence) == 0) || (w.evidence != "" && !slices.Contains(got.Evidence, w.evidence)) {
-			t.Errorf("step %d (%s) effect = %+v, want %s on %q", i+1, res.Steps[i].Note, got, w.class, w.evidence)
-		}
-		if (got.BlockedBy != nil) != w.modal {
-			t.Errorf("step %d modal = %+v, want present=%v", i+1, got.BlockedBy, w.modal)
-		}
+	action.Effect = "suspected_noop"
+	if action.project().Class != EffectUnverifiable {
+		t.Fatal("invented unchanged-value evidence")
+	}
+	result, err := waitStep(t.Context(), 1)
+	if err != nil || result.Effect.Class != "" {
+		t.Fatalf("wait: %+v %v", result, err)
 	}
 }
 
-func TestASnapshotSaysWhichModalHoldsTheInput(t *testing.T) {
+func TestASnapshotDoesNotInferAModalFromLabels(t *testing.T) {
 	s := fakeSession(t)
-	snap, err := s.Snapshot(context.Background(), "com.example.Held")
+	snap, err := s.Snapshot(t.Context(), "com.example.Notes")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snap.Modals) != 1 || snap.Modals[0] != (Modal{Ref: "a34", Title: "Error", Blocks: "Untitled"}) {
-		t.Fatalf("modals = %+v", snap.Modals)
-	}
-	if got := snap.Modals[0].String(); got != `the modal "Error" [a34] over "Untitled"` {
-		t.Fatalf("modal reads %q", got)
+	if len(snap.Modals) != 0 {
+		t.Fatal("CUA has no structured modal field")
 	}
 	if got := (Modal{}).String(); got != `the modal "(untitled)"` {
-		t.Fatalf("an unnamed modal reads %q", got)
+		t.Fatal(got)
 	}
 }
 

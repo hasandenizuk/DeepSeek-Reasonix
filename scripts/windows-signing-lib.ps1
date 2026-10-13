@@ -13,7 +13,7 @@ $script:ReleaseSignedPe = @(
     "Reasonix Studio.exe",
     "dxcompiler.dll",
     "ffmpeg.dll",
-    "resources/bin/reasonix-computer-helper.exe",
+    "resources/bin/cua-driver.exe",
     "resources/bin/reasonix-studio-host.exe",
     "vk_swiftshader.dll",
     "vulkan-1.dll"

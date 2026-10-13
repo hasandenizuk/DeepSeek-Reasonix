@@ -89,6 +89,7 @@ func runUnattended(ctx context.Context, parent Options, sink event.Sink, mode, r
 	}
 	defer os.RemoveAll(sessDir)
 	ctrl, err := Build(ctx, Options{
+		ComputerDriver:       parent.ComputerDriver,
 		WorkspaceRoot:        root,
 		Home:                 parent.Home,
 		Model:                model,

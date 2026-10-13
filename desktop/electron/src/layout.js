@@ -15,13 +15,11 @@ function hostBinary({ packaged, resourcesPath, dirname, platform, env = {} }) {
   return path.join(packaged ? resourcesPath : path.join(dirname, ".."), "bin", name);
 }
 
-// The helper that operates other applications exists on macOS and Windows. Its
-// permissions are the application's that started it, so it runs as this
-// shell's grandchild rather than being found anywhere else.
-function computerHelper({ packaged, resourcesPath, dirname, platform, env = {} }) {
-  if (env.REASONIX_COMPUTER_HELPER) return env.REASONIX_COMPUTER_HELPER;
-  if (platform !== "darwin" && platform !== "win32") return "";
-  const name = platform === "win32" ? "reasonix-computer-helper.exe" : "reasonix-computer-helper";
+// The host owns the packaged CUA Driver; macOS permissions belong to its shell.
+function computerDriver({ packaged, resourcesPath, dirname, platform, env = {} }) {
+  if (env.REASONIX_CUA_DRIVER) return env.REASONIX_CUA_DRIVER;
+  if (!["darwin", "win32", "linux"].includes(platform)) return "";
+  const name = platform === "win32" ? "cua-driver.exe" : "cua-driver";
   return path.join(packaged ? resourcesPath : path.join(dirname, ".."), "bin", name);
 }
 
@@ -31,4 +29,8 @@ function pageDir({ packaged, resourcesPath, dirname, env = {} }) {
   return path.join(root, "frontend-next", "dist");
 }
 
-module.exports = { hostBinary, computerHelper, pageDir };
+function computerDriverContract({ packaged, resourcesPath, dirname }) {
+  return packaged ? path.join(resourcesPath, "bin", "cua-driver.lock.json") : path.resolve(dirname, "../../../internal/platform/computer/cua-driver.lock.json");
+}
+
+module.exports = { computerDriverContract, hostBinary, computerDriver, pageDir };

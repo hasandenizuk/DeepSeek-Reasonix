@@ -16,6 +16,7 @@ import (
 	"reasonix/internal/contract/surface"
 	"reasonix/internal/ext/plugin"
 	"reasonix/internal/model/billing"
+	"reasonix/internal/platform/computer"
 	"reasonix/internal/runtime/taskmonitor"
 	"reasonix/internal/safety/sandbox"
 	"reasonix/internal/session/control"
@@ -31,6 +32,7 @@ import (
 // run/serve pass true so a missing key fails fast, chat/desktop false so the UI
 // is reachable before one is set.
 type Options struct {
+	ComputerDriver *computer.Driver
 	// Version is the host declaring a real installation, which is what lets an
 	// assembly record the last-known-good config snapshot recovery reads back.
 	Version     string

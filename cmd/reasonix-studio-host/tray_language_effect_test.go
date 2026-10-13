@@ -47,7 +47,7 @@ func TestAssembledTrayLanguage(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			hub, err := assemble(ctx, io.Discard, io.Discard, shellIdentity{}, nil, newStartupPhases(io.Discard, time.Now))
+			hub, err := assemble(ctx, io.Discard, io.Discard, shellIdentity{}, nil, newStartupPhases(io.Discard, time.Now), nil)
 			if err != nil {
 				t.Fatalf("assemble: %v", err)
 			}

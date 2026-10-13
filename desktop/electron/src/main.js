@@ -8,6 +8,7 @@ const fs = require("node:fs/promises");
 const { existsSync } = require("node:fs");
 const path = require("node:path");
 const { start, shouldRetry, HANDSHAKE_TIMEOUT_MS } = require("./host");
+const { startEmbedded, createQuitGate } = require("./cua");
 const { showStarting } = require("./starting");
 const { StudioHost } = require("./hostclient");
 const { installTray } = require("./tray");
@@ -65,11 +66,12 @@ const where = {
   env: process.env,
 };
 const hostBinary = layout.hostBinary(where);
-const computerHelper = layout.computerHelper(where);
+const computerDriver = layout.computerDriver(where);
 const pageDir = layout.pageDir(where);
 
 const acts = actHandler({ app, showWindow: () => showWindow() });
 let kernel = null;
+let cua = null;
 let win = null;
 let origin = "";
 let quitting = false;
@@ -158,7 +160,14 @@ async function boot() {
   // falls back to Electron's own, which named a Studio that never shipped and
   // ranked it ahead of every published release.
   const args = ["-page", pageDir, "-crash-dir", crashDir(logs.dir)];
-  if (computerHelper && existsSync(computerHelper)) args.push("-computer-helper", computerHelper);
+  if (computerDriver && existsSync(computerDriver)) {
+    if (process.platform === "darwin") {
+      const contract = JSON.parse(await fs.readFile(layout.computerDriverContract(where), "utf8"));
+cua = await startEmbedded(computerDriver, contract, text => logs.host.raw(text));
+      args.push("-computer-socket", cua.socket, "-computer-abort-socket", cua.abortSocket);
+    }
+    args.push("-cua-driver", computerDriver);
+  }
   if (app.isPackaged) {
     args.push("-studio-version", app.getVersion());
     // The other half the kernel cannot work out: which file the application
@@ -557,9 +566,11 @@ app.on("window-all-closed", () => {
 // than a copy of it.
 module.exports = { current: () => ({ win, tray, client, origin }) };
 
-app.on("before-quit", () => {
+const drainCua = createQuitGate(() => cua, () => app.quit(), error => logs.shell.line(`CUA cleanup: ${error.message}`));
+app.on("before-quit", event => {
   quitting = true;
   logs.shell.line("shell: quitting");
+  drainCua(event);
   browserRelay?.stop();
   powerGuard?.close();
   tray?.close();

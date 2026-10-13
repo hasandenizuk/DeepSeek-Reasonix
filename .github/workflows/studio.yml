@@ -181,6 +181,31 @@ jobs:
         if: env.RUN_STEPS == 'true'
         run: go test ./...
 
+      - if: env.RUN_STEPS == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24"
+
+      - name: CUA process and packaging contracts
+        if: env.RUN_STEPS == 'true'
+        timeout-minutes: 2
+        run: node --test --test-name-pattern=CUA electron/test/unit.mjs
+
+      - name: Install Linux native CUA fixture dependencies
+        if: env.RUN_STEPS == 'true' && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb openbox dbus-x11 libgtk-3-dev at-spi2-core
+
+      - name: Native CUA application acceptance
+        if: env.RUN_STEPS == 'true'
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            dbus-run-session -- xvfb-run -a sh -c 'openbox >/tmp/reasonix-openbox.log 2>&1 & export NO_AT_BRIDGE=0 GTK_MODULES=gail:atk-bridge; node electron/test/cua-native.mjs'
+          else
+            node electron/test/cua-native.mjs
+          fi
+
       # The host sits in the main module and nothing else builds it, so its
       # dependency closure is checked here: it must stay CGO-free and
       # platform-neutral or the Electron bundle cannot ship it. Cross-compiling

@@ -15,6 +15,7 @@ import (
 
 	"reasonix/internal/assembly/boot"
 	"reasonix/internal/model/billing"
+	"reasonix/internal/platform/computer"
 
 	"reasonix/internal/base/fileutil"
 	"reasonix/internal/contract/config"
@@ -120,6 +121,7 @@ type Runtime struct {
 
 // HubOptions carries what the embedding host decides for every runtime.
 type HubOptions struct {
+	ComputerDriver *computer.Driver
 	// LogsDir is where the shell keeps its logs, when there is a shell. Empty
 	// means this kernel has no such place to report.
 	LogsDir string
@@ -325,6 +327,7 @@ func (h *Hub) Open(ctx context.Context, req OpenRequest) (*Runtime, error) {
 	bc := NewBroadcaster()
 	paneSink := h.decorateSink(bc)
 	built, err := boot.BuildRuntime(ctx, boot.Options{
+		ComputerDriver:  h.opts.ComputerDriver,
 		Model:           strings.TrimSpace(req.Model),
 		WorkspaceRoot:   root,
 		SessionDir:      SessionDirFor(root),

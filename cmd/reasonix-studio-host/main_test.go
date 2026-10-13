@@ -418,7 +418,7 @@ func TestRunServesUntilTheParentLetsGo(t *testing.T) {
 	go func() { _, _ = io.Copy(io.Discard, logs) }()
 
 	done := make(chan int, 1)
-	go func() { done <- run(lease, announced, logged, page, shellIdentity{version: "2.10.0"}) }()
+	go func() { done <- run(lease, announced, logged, page, shellIdentity{version: "2.10.0"}, nil) }()
 
 	line, err := bufio.NewReader(stdout).ReadString('\n')
 	if err != nil {
@@ -542,7 +542,7 @@ func TestAssembleAppliesTheStartupUpgrades(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(testenv.TempDir(t))
-	hub, err := assemble(t.Context(), io.Discard, io.Discard, shellIdentity{}, nil, newStartupPhases(io.Discard, time.Now))
+	hub, err := assemble(t.Context(), io.Discard, io.Discard, shellIdentity{}, nil, newStartupPhases(io.Discard, time.Now), nil)
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
 	}

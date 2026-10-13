@@ -59,7 +59,7 @@ func browserCall(id, name string, args any) *provider.ToolCall {
 	return &provider.ToolCall{ID: id, Name: name, Arguments: string(raw)}
 }
 
-func buildBrowserEffect(t *testing.T, browserSection string, rounds []func(string) *provider.ToolCall) []provider.Request {
+func buildBrowserEffect(t *testing.T, browserSection string, rounds []func(string) *provider.ToolCall, options ...Options) []provider.Request {
 	t.Helper()
 	isolateConfigHome(t)
 	dir := robustTempDir(t)
@@ -85,7 +85,11 @@ kind = "`+kind+`"
 model = "x"
 `)
 	approveWorkspace(t, dir)
-	ctrl, err := Build(context.Background(), Options{Sink: event.Discard})
+	opts := Options{Sink: event.Discard}
+	if len(options) > 0 {
+		opts.ComputerDriver = options[0].ComputerDriver
+	}
+	ctrl, err := Build(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

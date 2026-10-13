@@ -27,10 +27,10 @@ func TestComputerToolsWithoutAHelperSayItIsUnavailable(t *testing.T) {
 
 func TestApplicationListMarksTheOnesNeverOperated(t *testing.T) {
 	out := renderApps([]computer.App{
-		{Bundle: "com.apple.Notes", Name: "Notes", Active: true, Windows: []computer.Window{{Title: "", Bounds: computer.Rect{Width: 800, Height: 600}}}},
+		{Bundle: "com.apple.Notes", Name: "Notes", Active: true, Windows: []computer.Window{{ID: 1, Title: "", Bounds: computer.Rect{Width: 800, Height: 600}}}},
 		{Bundle: "com.apple.Terminal", Name: "Terminal"},
 	})
-	if !strings.Contains(out, `* com.apple.Notes — "Notes"`+"\n") || !strings.Contains(out, `window "(untitled)" 800×600`) {
+	if !strings.Contains(out, `* com.apple.Notes — "Notes"`+"\n") || !strings.Contains(out, `window 1 "(untitled)" 800×600`) {
 		t.Fatalf("listing = %q", out)
 	}
 	if !strings.Contains(out, `com.apple.Terminal — "Terminal" (never operated: a terminal)`) {

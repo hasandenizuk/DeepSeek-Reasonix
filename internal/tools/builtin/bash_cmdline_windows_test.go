@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"reasonix/internal/contract/tool"
 	"reasonix/internal/safety/sandbox"
@@ -34,16 +35,19 @@ func TestBashRefusesCommandLineOverWindowsLimit(t *testing.T) {
 		t.Skip("powershell not found")
 	}
 	sh := sandbox.Shell{Kind: sandbox.ShellPowerShell, Path: powershell}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
 
-	fits := powerShellCommandAtUnits(t, sh, windowsCommandLineMax)
-	args, _ := json.Marshal(map[string]any{"command": fits})
-	res, err := (bash{shell: sh}).ExecuteDetailed(ctx, args)
-	if err != nil {
-		t.Fatalf("command at the limit failed: %v", err)
+	for _, units := range []int{windowsCommandLineMax - 1, windowsCommandLineMax} {
+		fits := powerShellCommandAtUnits(t, sh, units)
+		if err := checkCommandLine(unconfinedShellArgv(sh, fits)); err != nil {
+			t.Fatalf("preflight refused %d units: %v", units, err)
+		}
 	}
-	if !strings.Contains(res.Output, "中中中") {
-		t.Fatalf("command at the limit output = %.80q", res.Output)
+	args, _ := json.Marshal(map[string]any{"command": "Write-Output '中中中'"})
+	res, err := (bash{shell: sh}).ExecuteDetailed(ctx, args)
+	if err != nil || !strings.Contains(res.Output, "中中中") {
+		t.Fatalf("Unicode command failed: %v; output %.80q", err, res.Output)
 	}
 
 	over := powerShellCommandAtUnits(t, sh, windowsCommandLineMax+1)

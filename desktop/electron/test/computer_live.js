@@ -26,7 +26,7 @@ function buildTarget(dir) {
 <key>CFBundleName</key><string>Computer Target</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 </dict></plist>`);
-  const source = path.join(__dirname, "..", "..", "..", "internal", "computer", "testdata", "target.swift");
+  const source = path.join(__dirname, "..", "..", "..", "internal", "platform", "computer", "testdata", "target.swift");
   const built = spawnSync("swiftc", ["-O", source, "-o", path.join(macos, "target")], { stdio: "inherit" });
   if (built.status !== 0) throw new Error("the probe application did not build");
   const log = path.join(dir, "target.log");
@@ -39,7 +39,7 @@ const logged = (log) => (fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "")
 function operatingModel() {
   return scriptedModel((tools) => {
     const last = tools.length ? tools[tools.length - 1] : "";
-    const ref = (role, name) => (last.match(new RegExp(`- ${role} "${name}" \\[(a\\d+)\\]`)) || [])[1];
+    const ref = (role, name) => (last.match(new RegExp(`- ${role} "${name}" \\[(r[A-Za-z0-9]+)\\]`)) || [])[1];
     switch (tools.length) {
       case 0:
         return { name: "computer_read", arguments: { what: "apps" } };
@@ -47,10 +47,7 @@ function operatingModel() {
         return { name: "computer_read", arguments: { what: "snapshot", app: BUNDLE } };
       case 2:
         return { name: "computer_act", arguments: { app: BUNDLE, steps: [
-          { action: "set_value", ref: ref("textField", "Probe field"), text: "from-studio" },
-          { action: "click", ref: ref("button", "Probe button") },
-          { action: "focus", ref: ref("textField", "Probe field") },
-          { action: "type", text: " 李雷" },
+          { action: "set_value", ref: ref("textField", "Probe field"), text: "from-studio 李雷" },
         ] } };
       case 3:
         return { name: "computer_read", arguments: { what: "screenshot", app: BUNDLE } };
@@ -126,11 +123,10 @@ async function main() {
     const results = (requests[5].messages || []).filter((m) => m.role === "tool").map((m) => String(m.content || ""));
     check("the kernel was given computer use", results.length === 5, results.length);
     check("the model saw the probe among the applications", (results[0] || "").includes(`${BUNDLE} — `), (results[0] || "").slice(0, 400));
-    check("the snapshot carried refs", /textField "Probe field" \[a\d+\]/.test(results[1] || ""), (results[1] || "").slice(0, 400));
-    check("every step ran", (results[2] || "").includes("Completed 4 of 4 step(s)."), (results[2] || "").slice(0, 600));
+    check("the snapshot carried refs", /textField "Probe field" \[r[A-Za-z0-9]+\]/.test(results[1] || ""), (results[1] || "").slice(0, 400));
+    check("the value change ran", (results[2] || "").includes("Completed 1 of 1 step(s)."), (results[2] || "").slice(0, 600));
     await until("the input in the application", async () => logged(target.log).includes("text from-studio 李雷"), 10000).catch(() => {});
     const received = logged(target.log);
-    check("the button was pressed", received.includes("button pressed"), received);
     check("the text arrived", received.includes("text from-studio 李雷"), received);
     check("the pointer is asked for although the application is already granted", person.asked.length === 3, person.asked);
     check("a refused pointer never reached the application", !received.includes("mouseDown"), received);

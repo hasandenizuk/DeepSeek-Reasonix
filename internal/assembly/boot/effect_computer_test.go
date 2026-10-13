@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
 	"reasonix/internal/contract/provider"
+	"reasonix/internal/platform/computer"
 	"reasonix/internal/safety/evidence"
 	"reasonix/internal/safety/permission"
 )
@@ -23,36 +25,39 @@ func runFakeComputerHelper(in io.Reader, out io.Writer) {
 	sc := bufio.NewScanner(in)
 	for sc.Scan() {
 		var req struct {
-			ID     int64          `json:"id"`
-			Method string         `json:"method"`
-			Params map[string]any `json:"params"`
+			ID     int64  `json:"id"`
+			Method string `json:"method"`
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
 		}
-		if json.Unmarshal(sc.Bytes(), &req) != nil {
+		if json.Unmarshal(sc.Bytes(), &req) != nil || req.ID == 0 {
 			continue
 		}
-		var result any = map[string]any{}
-		switch req.Method {
-		case "apps":
-			result = map[string]any{"apps": []any{map[string]any{
-				"pid": 42, "bundle": "com.example.Notes", "name": "Notes", "active": true,
-				"windows": []any{map[string]any{"id": 1, "title": "Draft", "bounds": map[string]any{"x": 0, "y": 0, "width": 800, "height": 600}}},
-			}}}
-		case "snapshot":
-			result = map[string]any{
-				"lines":  []string{`- window "Draft" [a1]`, `  - textField "Body" [a2] value="` + value + `"`, `  - window "Unsaved changes" [a9] modal`},
-				"modals": []any{map[string]any{"ref": "a9", "title": "Unsaved changes", "blocks": "Draft"}},
+		var result any = map[string]any{"serverInfo": map[string]any{"version": computer.Contract().Version}}
+		if req.Method == "tools/list" {
+			tools := []any{}
+			for _, name := range []string{"list_apps", "list_windows", "get_window_state", "set_value"} {
+				tools = append(tools, map[string]any{"name": name, "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"delivery_mode": map[string]any{"type": "string"}}}})
 			}
-		case "set_value":
-			value, _ = req.Params["text"].(string)
-			result = map[string]any{"effect": map[string]any{"class": "confirmed", "evidence": []string{"value_readback"}}}
-		case "type":
-			_ = enc.Encode(map[string]any{"id": req.ID, "error": map[string]any{
-				"code": "computer.blocked", "message": "the keys would land in a dialog whose focused element takes no text",
-				"blocked_by": map[string]any{"ref": "a9", "title": "Unsaved changes", "blocks": "Draft"},
-			}})
-			continue
+			result = map[string]any{"tools": tools}
 		}
-		_ = enc.Encode(map[string]any{"id": req.ID, "result": result})
+		if req.Method == "tools/call" {
+			var data any = map[string]any{"effect": "confirmed", "route": "accessibility", "summary": "fixture field read back", "evidence": []any{map[string]any{"kind": "value_readback"}}}
+			switch req.Params.Name {
+			case "list_apps":
+				data = map[string]any{"apps": []any{map[string]any{"pid": os.Getpid(), "bundle_id": "com.example.Notes", "name": "Notes", "active": true, "running": true}}}
+			case "list_windows":
+				data = map[string]any{"windows": []any{map[string]any{"pid": os.Getpid(), "window_id": 1, "title": "Draft", "bounds": map[string]any{"width": 800, "height": 600}}}}
+			case "get_window_state":
+				data = map[string]any{"pid": os.Getpid(), "window_id": 1, "elements": []any{map[string]any{"element_token": "s00000001:2", "role": "textField", "label": "Body", "value": value, "depth": 0}}}
+			case "set_value":
+				value, _ = req.Params.Arguments["value"].(string)
+			}
+			result = map[string]any{"structuredContent": data, "content": []any{}}
+		}
+		_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
 	}
 }
 
@@ -64,50 +69,44 @@ func TestEffectComputerUseThroughTheRealAssembly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(fakeComputerHelperEnv, "1")
-	SetComputerHelper(exe)
-	t.Cleanup(func() { SetComputerHelper("") })
+	driver := computer.NewDriver(exe, os.Environ())
+	t.Cleanup(driver.Close)
 
 	reqs := buildBrowserEffect(t, "", []func(string) *provider.ToolCall{
 		func(string) *provider.ToolCall {
 			return browserCall("apps-1", "computer_read", map[string]any{"what": "apps"})
 		},
 		func(string) *provider.ToolCall {
+			return browserCall("snapshot-1", "computer_read", map[string]any{"what": "snapshot", "app": "com.example.Notes"})
+		},
+		func(last string) *provider.ToolCall {
+			ref := regexp.MustCompile(`\[(r[A-Za-z0-9]+)\]`).FindStringSubmatch(last)
+			if len(ref) != 2 {
+				t.Fatalf("no snapshot ref: %s", last)
+			}
 			return browserCall("act-1", "computer_act", map[string]any{"app": "com.example.Notes", "steps": []any{
-				map[string]any{"action": "set_value", "ref": "a2", "text": "hello"},
-				map[string]any{"action": "type", "text": " world"},
+				map[string]any{"action": "set_value", "ref": ref[1], "text": "hello"},
 			}})
 		},
-	})
+	}, Options{ComputerDriver: driver})
 	for _, name := range ComputerToolNames() {
 		if !toolNames(reqs[0])[name] {
 			t.Fatalf("%s missing from the schema of a host with a helper: %v", name, toolSchemaNames(reqs[0].Tools))
 		}
 	}
 	results := effectToolResults(reqs[len(reqs)-1])
-	if len(results) != 2 {
+	if len(results) != 3 {
 		t.Fatalf("tool results = %q", results)
 	}
 	if !strings.Contains(results[0], `* com.example.Notes — "Notes"`) {
 		t.Fatalf("the application list did not reach the model:\n%s", results[0])
 	}
-	if !strings.Contains(results[1], "Completed 1 of 2 step(s).") || !strings.Contains(results[1], `[a2] value="hello"`) {
-		t.Fatalf("the act result did not show the application afterwards:\n%s", results[1])
-	}
-	// What the helper read back, and the modal that swallowed the next step,
-	// reach the model as the host knows them rather than as a bare success.
-	for _, want := range []string{
-		"1. set a2 to 5 characters — took effect (value read back)",
-		`Step 2 failed: computer.blocked: the keys would land in a dialog whose focused element takes no text; held by the modal "Unsaved changes" [a9] over "Draft"`,
-		`Blocked: the modal "Unsaved changes" [a9] over "Draft" holds this application's input`,
-	} {
-		if !strings.Contains(results[1], want) {
-			t.Fatalf("the act result is missing %q:\n%s", want, results[1])
-		}
+	if !strings.Contains(results[2], "Completed 1 of 1 step(s).") || !strings.Contains(results[2], `value="hello"`) {
+		t.Fatalf("the act result did not show the application afterwards:\n%s", results[2])
 	}
 }
 
 func TestEffectHostWithoutAHelperLeavesComputerUseOutOfTheSchema(t *testing.T) {
-	SetComputerHelper("")
 	reqs := buildBrowserEffect(t, "", nil)
 	for _, name := range ComputerToolNames() {
 		if toolNames(reqs[0])[name] {

@@ -1,7 +1,6 @@
 package computer
 
 import (
-	"slices"
 	"strings"
 
 	"reasonix/internal/base/textutil"
@@ -17,7 +16,7 @@ const (
 	EffectSuspectedNoop EffectClass = "suspected_noop"
 )
 
-// Evidence is the kind of fact the helper read that a class rests on.
+// Evidence is the kind of fact the driver read that a class rests on.
 type Evidence string
 
 const (
@@ -25,16 +24,10 @@ const (
 	EvidenceValueUnchanged Evidence = "value_unchanged"
 )
 
-// classEvidence is what each class other than unverifiable must carry. An
-// accepted call or a changed screen proves nothing about the target.
-var classEvidence = map[EffectClass]Evidence{
-	EffectConfirmed:     EvidenceValueReadback,
-	EffectSuspectedNoop: EvidenceValueUnchanged,
-}
-
 // Effect is what is known of a step that went through. Class is empty for a
 // step that sends the application nothing, such as a wait.
 type Effect struct {
+	Driver   *DriverAction
 	Class    EffectClass
 	Evidence []Evidence
 	// BlockedBy is the modal the input went to instead of the window behind it.
@@ -80,25 +73,4 @@ func (m Modal) String() string {
 		s += " over " + ShownName(m.Blocks)
 	}
 	return s
-}
-
-type wireEffect struct {
-	Class     string   `json:"class"`
-	Evidence  []string `json:"evidence"`
-	BlockedBy *Modal   `json:"blocked_by"`
-}
-
-// settle grants the helper's class only when its evidence is there; anything
-// else, an older helper's silence included, is unverifiable.
-func (w *wireEffect) settle() Effect {
-	e := Effect{Class: EffectUnverifiable}
-	if w == nil {
-		return e
-	}
-	e.BlockedBy = w.BlockedBy
-	class := EffectClass(w.Class)
-	if need, ok := classEvidence[class]; ok && slices.Contains(w.Evidence, string(need)) {
-		e.Class, e.Evidence = class, []Evidence{need}
-	}
-	return e
 }

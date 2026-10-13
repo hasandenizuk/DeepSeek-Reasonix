@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Code is the identity of a computer-use failure, shared with the helper that
+// Code is the identity of a computer-use failure, shared with the driver that
 // reports most of them.
 type Code string
 
@@ -28,6 +28,8 @@ const (
 	CodeStopped           Code = "computer.stopped"
 	CodeCaptureFailed     Code = "computer.capture_failed"
 	CodeFailed            Code = "computer.failed"
+	CodeDriverRefused     Code = "computer.driver_refused"
+	CodeEffectUnknown     Code = "computer.effect_unknown"
 )
 
 // Failure is an operation that did not happen, and the host's account of why.

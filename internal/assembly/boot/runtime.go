@@ -17,6 +17,7 @@ import (
 	"reasonix/internal/ext/hook"
 	"reasonix/internal/ext/plugin"
 	"reasonix/internal/ext/skill"
+	"reasonix/internal/platform/computer"
 	"reasonix/internal/session/control"
 )
 
@@ -28,9 +29,10 @@ import (
 // package is installed, and its Close is chained into the controller's
 // cleanup so sidecars die with their controller generation.
 type BuildResult struct {
-	Controller *control.Controller
-	Snapshot   *extension.RuntimeSnapshot
-	Runtime    *extension.RuntimeSet
+	ComputerDriver *computer.Driver
+	Controller     *control.Controller
+	Snapshot       *extension.RuntimeSnapshot
+	Runtime        *extension.RuntimeSet
 	// Owner is the session-lineage lifecycle owner. Independent builds receive
 	// independent owners; RebuildFrom reuses the previous owner so only that
 	// lineage's old generation drains.

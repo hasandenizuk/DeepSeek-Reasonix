@@ -4369,7 +4369,8 @@ func waitForMCPFailure(t *testing.T, h *plugin.Host, name string, timeout time.D
 // context is cancelled before Build returns; a successful stdio child must
 // still live on the session context and accept its first real tool call.
 func TestBuildExtraPluginProbeKeepsSessionProcessAlive(t *testing.T) {
-	t.Parallel()
+	// Its five-second readiness budget must measure lifecycle, not contention
+	// from the suite's concurrent fixture-process launches.
 	home := statedBootHome(t)
 	workspace := testenv.TempDir(t)
 

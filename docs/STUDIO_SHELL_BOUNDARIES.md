@@ -93,26 +93,26 @@ the real kernel with a scripted model.
 
 ## 5. Other applications
 
-On macOS the agent can read and operate other applications, and the split holds
-here as well.
+Studio operates approved applications through the pinned CUA Driver on macOS,
+Windows and Linux.
 
-- **The kernel** owns what the model sees and may reach: bundle ids, the
-  applications never operated, screenshot geometry, and who approved which
-  application.
-- **The helper** (`desktop/computer-helper`, Swift) carries operations out over
-  JSON lines on stdin and stdout, and decides nothing.
-- **The main process** only finds the helper beside the kernel and passes its
-  path with `-computer-helper`.
+- The kernel owns application and foreground approval, exact window scope,
+  private observation references, screenshot geometry and conservative effects.
+- CUA Driver owns native input and capture through initialized MCP. Reasonix
+  does not maintain native input shims or silently retry in foreground.
+- The host owns one Driver, passes it explicitly through runtime assembly and
+  closes it after its panes drain. Each controller owns private observations;
+  rebuilds retain the host driver without granting independent builds access.
+- On macOS, Electron owns a private embedded service so Accessibility and
+  Screen Recording permissions belong to Studio. Its abort-only endpoint waits
+  for the owned service to terminate before acknowledging fresh readiness.
+- The canonical manifest in `internal/platform/computer/cua-driver.lock.json`
+  supplies runtime contracts and artifact hashes to Go, Electron and packaging.
 
-- The host starts the helper, so macOS attributes Accessibility and Screen
-  Recording to Reasonix Studio.
-- A click is an accessibility action on the element under a point. The person's
-  pointer and the frontmost application stay as they were.
-- The helper draws its own cursor where the agent acts. Escape pressed while it
-  shows stops the run between steps.
-
-`internal/platform/computer/live_test.go` (`REASONIX_LIVE_COMPUTER=<helper>`) drives a
-real application through the helper.
+`internal/platform/computer/live_test.go` (`REASONIX_LIVE_COMPUTER=<cua-driver>`)
+operates a source-built target. Native macOS/Linux acceptance remains separate
+from cross-compilation and process fixtures. See [computer use](design/COMPUTER_USE.md)
+for supported operations and verification limits.
 
 ## 6. State taxonomy
 

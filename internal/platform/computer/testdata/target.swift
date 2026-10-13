@@ -57,6 +57,14 @@ final class Delegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         field.identifier = NSUserInterfaceItemIdentifier("probe-field")
         field.setAccessibilityLabel("Probe field")
         field.delegate = self
+        field.isEditable = true
+        var observedValue = field.stringValue
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+            if field.stringValue != observedValue {
+                observedValue = field.stringValue
+                log("text \(observedValue)")
+            }
+        }
         let button = NSButton(title: "Probe button", target: self, action: #selector(pressed))
         button.frame = NSRect(x: 290, y: 148, width: 110, height: 28)
         let click = ClickView(frame: NSRect(x: 20, y: 20, width: 160, height: 100))

@@ -6,6 +6,7 @@ import os from "node:os";
 import fs from "node:fs";
 
 const require = createRequire(import.meta.url);
+const cuaContract = require("../../../internal/platform/computer/cua-driver.lock.json");
 const { parse, readActs, start } = require("../src/host.js");
 const { contextTemplate, editMenuTemplate, applicationMenuTemplate, menuInstaller } = require("../src/editmenu.js");
 const { uiLanguage } = require("../src/uilang.js");
@@ -385,7 +386,7 @@ test("on Windows a share or device path from the kernel is refused", async () =>
   }
 });
 
-const { hostBinary, computerHelper, pageDir } = require("../src/layout.js");
+const { hostBinary, computerDriver, pageDir } = require("../src/layout.js");
 
 // Packaged, both live in resources/ beside app.asar. Reading them from inside
 // it is the failure this pins: a child process cannot be spawned out of an
@@ -403,13 +404,13 @@ test("the kernel and the page are found in both layouts", () => {
   }
 });
 
-test("the computer-use helper is found beside the kernel on macOS and Windows, and nowhere else", () => {
+test("the CUA Driver is found beside the kernel on all supported platforms", () => {
   const mac = { packaged: true, resourcesPath: "/res", dirname: "/d/src", platform: "darwin" };
-  assert.equal(computerHelper(mac), path.join("/res", "bin", "reasonix-computer-helper"));
-  assert.equal(computerHelper({ ...mac, packaged: false, dirname: path.join("/repo", "electron", "src") }), path.join("/repo", "electron", "bin", "reasonix-computer-helper"));
-  assert.equal(computerHelper({ ...mac, platform: "win32" }), path.join("/res", "bin", "reasonix-computer-helper.exe"));
-  assert.equal(computerHelper({ ...mac, platform: "linux" }), "");
-  assert.equal(computerHelper({ ...mac, platform: "linux", env: { REASONIX_COMPUTER_HELPER: "/custom/helper" } }), "/custom/helper");
+  assert.equal(computerDriver(mac), path.join("/res", "bin", "cua-driver"));
+  assert.equal(computerDriver({ ...mac, packaged: false, dirname: path.join("/repo", "electron", "src") }), path.join("/repo", "electron", "bin", "cua-driver"));
+  assert.equal(computerDriver({ ...mac, platform: "win32" }), path.join("/res", "bin", "cua-driver.exe"));
+  assert.equal(computerDriver({ ...mac, platform: "linux" }), path.join("/res", "bin", "cua-driver"));
+  assert.equal(computerDriver({ ...mac, platform: "linux", env: { REASONIX_CUA_DRIVER: "/custom/cua-driver" } }), "/custom/cua-driver");
 });
 
 test("Windows gets the suffix spawn needs, and an override wins over both", () => {
@@ -2247,4 +2248,97 @@ test("Linux clears its launcher badge without requiring Dock APIs", () => {
   setUnreadBadge(true, {}, { app }, "linux");
   setUnreadBadge(false, {}, { app }, "linux");
   assert.deepEqual(counts, [1, 0]);
+});
+
+test("CUA readiness refuses a different process, host or driver version", () => {
+  const { accepts } = require("../src/cua");
+  const result = { pid: 123, embedded: true, host_bundle_id: "io.reasonix.studio", driver_version: "0.34.1", contract_version: "0.8.0", tools_list_schema_version: "1", capability_version: "1", mcp_protocol_version: "2025-06-18" };
+  assert.equal(accepts({ ok: true, result }, 123, cuaContract), true);
+  for (const [key, value] of Object.entries({ pid: 124, embedded: false, host_bundle_id: "other", driver_version: "0.35.0", contract_version: "0.9.0", mcp_protocol_version: "2026-07-28" })) {
+    assert.equal(accepts({ ok: true, result: { ...result, [key]: value } }, 123, cuaContract), false);
+  }
+  assert.equal(accepts({ ok: false, result }, 123), false);
+});
+
+
+test("CUA interruption waits for the owned service to stop", async () => {
+  const { spawn } = require("node:child_process");
+  const { stopProcess } = require("../src/cua");
+  const child = spawn(process.execPath, ["-e", "process.stdin.resume();setInterval(()=>{},1000);process.stdin.on('end',()=>setTimeout(()=>process.exit(0),80))"], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+  await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+  await stopProcess(child, true);
+  assert.ok(child.exitCode !== null || child.signalCode !== null);
+});
+
+test("CUA embedded control stops the old service before admitting a fresh one", { skip: process.platform === "win32" }, async () => {
+  const { spawn } = require("node:child_process");
+  const net = require("node:net");
+  const { startEmbedded, metadata } = require("../src/cua");
+  const fake = path.join(path.dirname(require("node:url").fileURLToPath(import.meta.url)), "cua-service-fixture.js");
+  const owned = await startEmbedded(process.execPath, cuaContract, () => {}, (_exe, args, options) => spawn(process.execPath, [fake, ...args], options));
+  try {
+    const before = await metadata(owned.socket);
+    const reply = await new Promise((resolve, reject) => {
+      const peer = net.createConnection(owned.abortSocket);
+      let text = "";
+      peer.once("error", reject);
+      peer.on("connect", () => peer.write('{"op":"abort"}\n'));
+      peer.on("data", bytes => { text += bytes; if (text.includes("\n")) { peer.destroy(); resolve(JSON.parse(text)); } });
+    });
+    assert.equal(reply.ok, true);
+    const after = await metadata(owned.socket);
+    assert.notEqual(after.result.pid, before.result.pid);
+    assert.throws(() => process.kill(before.result.pid, 0));
+  } finally { await owned.stop(); }
+  assert.equal(fs.existsSync(owned.socket), false);
+  assert.equal(fs.existsSync(owned.abortSocket), false);
+});
+
+
+test("CUA repeated quit waits for owned driver cleanup", async () => {
+  const { createQuitGate } = require("../src/cua");
+  let resolveStop;
+  const stopped = new Promise(resolve => { resolveStop = resolve; });
+  let stops = 0, quits = 0, prevented = 0;
+  const gate = createQuitGate(() => ({ stop: () => { stops++; return stopped; } }), () => { quits++; }, assert.fail);
+  const event = { preventDefault: () => { prevented++; } };
+  gate(event);
+  gate(event);
+  await Promise.resolve();
+  assert.equal(stops, 1);
+  assert.equal(prevented, 2);
+  assert.equal(quits, 0);
+  resolveStop();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(quits, 1);
+  gate(event);
+  assert.equal(prevented, 2);
+});
+
+
+test("CUA extraction handles ZIP archives when GNU tar precedes the Windows reader", { skip: process.platform !== "win32" || !fs.existsSync("C:/Program Files/Git/usr/bin/tar.exe") }, () => {
+  const { spawnSync } = require("node:child_process");
+  const tar = "C:/Program Files/Git/usr/bin/tar.exe";
+  const stage = fs.mkdtempSync(path.join(os.tmpdir(), "reasonix-cua-extract-"));
+  try {
+    fs.writeFileSync(path.join(stage, "driver.zip"), Buffer.from("UEsDBBQAAAAIANomTV3uQOUFCQAAAAcAAAAOAAAAY3VhLWRyaXZlci5leGVLy6woKS1KBQBQSwECFAAUAAAACADaJk1d7kDlBQkAAAAHAAAADgAAAAAAAAAAAAAAgAEAAAAAY3VhLWRyaXZlci5leGVQSwUGAAAAAAEAAQA8AAAANQAAAAAA", "base64"));
+    const target = path.join(stage, "extracted");
+    fs.mkdirSync(target);
+    const script = `require(${JSON.stringify(require.resolve("../packaging/install-cua-driver"))}).extract(process.argv[1], process.argv[2])`;
+    const unpacked = spawnSync(process.execPath, ["-e", script, path.join(stage, "driver.zip"), target], { env: { ...process.env, PATH: path.dirname(tar) + path.delimiter + process.env.PATH } });
+    assert.equal(unpacked.status, 0, unpacked.stderr.toString());
+    assert.equal(fs.readFileSync(path.join(target, "cua-driver.exe"), "utf8"), "fixture");
+  } finally {
+    assert.ok(path.resolve(stage).startsWith(path.resolve(os.tmpdir()) + path.sep));
+    fs.rmSync(stage, { recursive: true, force: true });
+  }
+});
+
+
+test("CUA layout resolves one canonical contract in development and packaging", () => {
+ const { computerDriverContract } = require("../src/layout");
+ const dirname = path.dirname(require("node:url").fileURLToPath(import.meta.url));
+ const source = computerDriverContract({ packaged: false, dirname: path.join(dirname, "../src") });
+ assert.deepEqual(JSON.parse(fs.readFileSync(source, "utf8")), cuaContract);
+ assert.equal(computerDriverContract({ packaged: true, resourcesPath: "/res" }), path.join("/res", "bin", "cua-driver.lock.json"));
 });

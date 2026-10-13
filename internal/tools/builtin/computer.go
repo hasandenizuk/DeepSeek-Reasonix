@@ -18,12 +18,12 @@ func init() {
 
 const computerSnapshotLines = 300
 
-// ComputerTools binds the computer-use tools to the machine's helper.
+// ComputerTools binds the computer-use tools to the host's CUA Driver.
 func ComputerTools(session *computer.Session) []tool.Tool {
 	return []tool.Tool{computerRead{session: session}, computerAct{session: session}}
 }
 
-// ComputerBound reports whether t is a computer-use tool with a helper behind it.
+// ComputerBound reports whether t is a computer-use tool with a driver behind it.
 func ComputerBound(t tool.Tool) bool {
 	switch c := t.(type) {
 	case computerRead:
@@ -38,18 +38,18 @@ func ComputerBound(t tool.Tool) bool {
 // question of its own rather than one any application's grant answers.
 const computerAppsSubject = "apps"
 
-var errNoComputer = &computer.Failure{Code: computer.CodeUnavailable, Detail: "computer use runs only in Reasonix Studio on macOS and Windows"}
+var errNoComputer = &computer.Failure{Code: computer.CodeUnavailable, Detail: "computer use requires Reasonix Studio with its pinned CUA Driver"}
 
 type computerRead struct{ session *computer.Session }
 
 func (computerRead) Name() string { return "computer_read" }
 
 func (computerRead) Description() string {
-	return "See another application on this computer, named as what=apps lists it. what=apps lists applications with windows; snapshot returns its accessibility tree with [aN] refs for computer_act; screenshot captures its front window (computer_act x/y use its pixels, and the person is shown it too)."
+	return "See an approved application listed by what=apps. Select window by id when it has multiple windows. snapshot returns session-bound element refs in brackets for computer_act. screenshot captures that exact window; computer_act x/y use pixels of this latest displayed image. Old tokens and captures expire on refresh or reconnect."
 }
 
 func (computerRead) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"what":{"type":"string","enum":["apps","snapshot","screenshot"]},"app":{"type":"string"}},"required":["what"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"window":{"type":"integer","minimum":1},"what":{"type":"string","enum":["apps","snapshot","screenshot"]},"app":{"type":"string"}},"required":["what"]}`)
 }
 
 func (computerRead) ReadOnly() bool                                   { return false }
@@ -58,8 +58,9 @@ func (computerRead) Sequential(context.Context, json.RawMessage) bool { return t
 // PermissionArgs names the application read, or the listing.
 func (c computerRead) PermissionArgs(_ context.Context, args json.RawMessage) json.RawMessage {
 	var p struct {
-		What string `json:"what"`
-		App  string `json:"app"`
+		Window int    `json:"window"`
+		What   string `json:"what"`
+		App    string `json:"app"`
 	}
 	_ = json.Unmarshal(args, &p)
 	if p.What == "apps" {
@@ -75,8 +76,9 @@ func (c computerRead) Execute(ctx context.Context, args json.RawMessage) (string
 
 func (c computerRead) ExecuteWithImages(ctx context.Context, args json.RawMessage) (string, []string, error) {
 	var p struct {
-		What string `json:"what"`
-		App  string `json:"app"`
+		Window int    `json:"window"`
+		What   string `json:"what"`
+		App    string `json:"app"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", nil, fmt.Errorf("invalid args: %w", err)
@@ -92,13 +94,13 @@ func (c computerRead) ExecuteWithImages(ctx context.Context, args json.RawMessag
 		}
 		return renderApps(apps), nil, nil
 	case "snapshot":
-		snap, err := c.session.Snapshot(ctx, p.App)
+		snap, err := c.session.Snapshot(ctx, p.App, p.Window)
 		if err != nil {
 			return "", nil, err
 		}
 		return renderComputerSnapshot(snap), nil, nil
 	case "screenshot":
-		shot, app, err := c.session.Screenshot(ctx, p.App)
+		shot, app, err := c.session.Screenshot(ctx, p.App, p.Window)
 		if err != nil {
 			return "", nil, err
 		}
@@ -116,15 +118,12 @@ type computerAct struct{ session *computer.Session }
 func (computerAct) Name() string { return "computer_act" }
 
 func (computerAct) Description() string {
-	return "Operate another application. Steps run in order and stop at the first failure. Through its accessibility actions, leaving the pointer alone: " +
-		"click (ref, or x/y from a screenshot), right_click opens a ref's context menu, focus and set_value take a ref, type enters text where focus is and paste puts it there at once (the clipboard is borrowed and put back), key presses keys like Enter or Meta+s (control+s on Windows; times repeats), hold_key holds one for seconds. " +
-		"Paste needs the application in front on macOS; on Windows type, paste and key bring it forward. scroll brings a ref into view or turns the wheel by amount lines, wait pauses ms. " +
-		"pointer_move, pointer_click (button, times), pointer_drag (to_x/to_y) and pointer_position instead take the person's pointer and bring the application forward, approved separately; use them for what has no accessibility action, and the pointer goes back where it was. " +
-		"Returns a snapshot afterwards."
+	return "Operate an approved application through CUA Driver. Select window when the app has multiple windows. Use refs from its latest snapshot or coordinates from its latest screenshot. Background clicks, set_value, type/paste, key and scroll never silently escalate. pointer_click explicitly takes foreground control and requires separate approval. wait is bounded. Inspect fresh state after an unverified effect; never assume an action landed. Returns a snapshot afterwards."
+
 }
 
 func (computerAct) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"app":{"type":"string"},"steps":{"type":"array","items":{"type":"object","properties":{"action":{"type":"string","enum":["click","right_click","focus","set_value","type","paste","key","hold_key","scroll","wait","pointer_move","pointer_click","pointer_drag","pointer_position"]},"ref":{"type":"string"},"text":{"type":"string"},"key":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"amount":{"type":"number"},"ms":{"type":"integer"},"to_x":{"type":"number"},"to_y":{"type":"number"},"button":{"type":"string","enum":["left","right","middle"]},"times":{"type":"integer"},"seconds":{"type":"number"}},"required":["action"]}}},"required":["app","steps"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"app":{"type":"string"},"window":{"type":"integer","minimum":1},"steps":{"type":"array","maxItems":64,"items":{"type":"object","properties":{"action":{"type":"string","enum":["click","right_click","set_value","type","paste","key","scroll","wait","pointer_click"]},"ref":{"type":"string"},"text":{"type":"string"},"key":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"amount":{"type":"number"},"ms":{"type":"integer"},"to_x":{"type":"number"},"to_y":{"type":"number"},"button":{"type":"string","enum":["left","right","middle"]},"times":{"type":"integer"},"seconds":{"type":"number"}},"required":["action"]}}},"required":["app","steps"]}`)
 }
 
 func (computerAct) ReadOnly() bool                                   { return false }
@@ -133,8 +132,9 @@ func (computerAct) Sequential(context.Context, json.RawMessage) bool { return tr
 // PermissionArgs names the application operated.
 func (c computerAct) PermissionArgs(_ context.Context, args json.RawMessage) json.RawMessage {
 	var p struct {
-		App   string          `json:"app"`
-		Steps []computer.Step `json:"steps"`
+		App    string          `json:"app"`
+		Window int             `json:"window"`
+		Steps  []computer.Step `json:"steps"`
 	}
 	_ = json.Unmarshal(args, &p)
 	app := strings.TrimSpace(p.App)
@@ -146,8 +146,9 @@ func (c computerAct) PermissionArgs(_ context.Context, args json.RawMessage) jso
 
 func (c computerAct) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var p struct {
-		App   string          `json:"app"`
-		Steps []computer.Step `json:"steps"`
+		App    string          `json:"app"`
+		Window int             `json:"window"`
+		Steps  []computer.Step `json:"steps"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", fmt.Errorf("invalid args: %w", err)
@@ -158,7 +159,7 @@ func (c computerAct) Execute(ctx context.Context, args json.RawMessage) (string,
 	if len(p.Steps) == 0 {
 		return "", &computer.Failure{Code: computer.CodeBadStep, Detail: "steps is empty"}
 	}
-	res, stepErr := c.session.Act(ctx, p.App, p.Steps)
+	res, stepErr := c.session.Act(ctx, p.App, p.Steps, p.Window)
 	var out strings.Builder
 	fmt.Fprintf(&out, "Completed %d of %d step(s).\n", res.Done, len(p.Steps))
 	for i, step := range res.Steps {
@@ -170,7 +171,7 @@ func (c computerAct) Execute(ctx context.Context, args json.RawMessage) (string,
 	if res.App.Bundle == "" {
 		return out.String(), stepErr
 	}
-	snap, err := c.session.Snapshot(ctx, res.App.Bundle)
+	snap, err := c.session.Snapshot(ctx, res.App.Bundle, p.Window)
 	if err != nil {
 		fmt.Fprintf(&out, "The application could not be read afterwards: %v\n", err)
 		return out.String(), stepErr
@@ -196,7 +197,7 @@ func renderApps(apps []computer.App) string {
 			if w.Title != "" {
 				title = computer.ShownName(w.Title)
 			}
-			fmt.Fprintf(&b, "    window %s %.0f×%.0f\n", title, w.Bounds.Width, w.Bounds.Height)
+			fmt.Fprintf(&b, "    window %d %s %.0f×%.0f\n", w.ID, title, w.Bounds.Width, w.Bounds.Height)
 		}
 	}
 	if b.Len() == 0 {
@@ -228,6 +229,12 @@ func renderEffect(e computer.Effect) string {
 	}
 	if e.BlockedBy != nil {
 		b.WriteString(", into " + e.BlockedBy.String())
+	}
+	if e.Driver != nil {
+		fmt.Fprintf(&b, " [CUA effect=%s route=%s]", e.Driver.Effect, e.Driver.Route)
+		if e.Driver.Delivery != nil && e.Driver.Delivery.Count != nil {
+			fmt.Fprintf(&b, " delivered=%d", *e.Driver.Delivery.Count)
+		}
 	}
 	return b.String()
 }
